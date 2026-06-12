@@ -124,11 +124,33 @@
     gap: 12px;
   }
   .qr-display img {
-    width: 320px;
-    height: 320px;
+    width: min(70vh, 560px);
+    height: min(70vh, 560px);
     background: white;
     border-radius: 8px;
     image-rendering: pixelated;
+  }
+  /* Fullscreen QR mode */
+  .qr-fullscreen {
+    position: fixed;
+    inset: 0;
+    background: #fff;
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+  }
+  .qr-fullscreen img {
+    width: min(92vh, 92vw);
+    height: min(92vh, 92vw);
+    image-rendering: pixelated;
+  }
+  .qr-fullscreen .fs-hint {
+    color: #333;
+    font-size: 13px;
+    margin-top: 8px;
   }
   .frame-info {
     font-size: 14px;
@@ -153,8 +175,18 @@
     width: 100%;
     border-radius: 8px;
     background: #000;
+    border: 3px solid transparent;
+    transition: border-color 0.1s;
   }
+  video.hit { border-color: var(--good); }
   canvas.hidden { display: none; }
+  .missing-frames {
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--muted);
+    text-align: center;
+    word-break: break-all;
+  }
   .progress-wrap {
     margin-top: 12px;
   }
@@ -207,6 +239,7 @@
       <div class="controls-row">
         <button class="secondary" id="btn-playpause">Pause</button>
         <button class="secondary" id="btn-restart">Restart</button>
+        <button class="secondary" id="btn-fullscreen">Fullscreen</button>
       </div>
       <div class="speed-row">
         <span>Speed</span>
@@ -226,6 +259,7 @@
         <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
       </div>
       <div class="status-text" id="status-text">Point camera at the sending screen.</div>
+      <div class="missing-frames" id="missing-frames"></div>
     </div>
   </div>
 
@@ -306,6 +340,7 @@ btnGenerate.addEventListener('click', async () => {
 function showFrame() {
   if (frames.length === 0) return;
   qrImage.src = frames[currentFrame];
+  if (fsImg) fsImg.src = frames[currentFrame];
   frameInfo.textContent = `Frame ${currentFrame} / ${frames.length - 1}`;
 }
 
@@ -349,6 +384,35 @@ speedSlider.addEventListener('input', () => {
   if (playing) startLoop();
 });
 
+// Fullscreen QR mode - white background, QR as big as the screen allows.
+// Click anywhere to exit.
+const btnFullscreen = document.getElementById('btn-fullscreen');
+let fsOverlay = null;
+let fsImg = null;
+
+btnFullscreen.addEventListener('click', () => {
+  if (fsOverlay) return;
+  fsOverlay = document.createElement('div');
+  fsOverlay.className = 'qr-fullscreen';
+  fsImg = document.createElement('img');
+  fsImg.src = qrImage.src;
+  const hint = document.createElement('div');
+  hint.className = 'fs-hint';
+  hint.textContent = 'Click anywhere to exit fullscreen';
+  fsOverlay.appendChild(fsImg);
+  fsOverlay.appendChild(hint);
+  document.body.appendChild(fsOverlay);
+  fsOverlay.addEventListener('click', exitFullscreen);
+});
+
+function exitFullscreen() {
+  if (fsOverlay) {
+    fsOverlay.remove();
+    fsOverlay = null;
+    fsImg = null;
+  }
+}
+
 // ---------- RECEIVE LOGIC ----------
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
@@ -381,7 +445,7 @@ async function startCamera() {
   }
   video.srcObject = stream;
   resetTransferState();
-  scanTimer = setInterval(scanFrame, 150);
+  scanTimer = setInterval(scanFrame, 60);
 }
 
 function stopCamera() {
@@ -404,6 +468,8 @@ function resetTransferState() {
   progressFill.classList.remove('done');
   statusText.textContent = 'Point camera at the sending screen.';
   statusText.classList.remove('done');
+  const mf = document.getElementById('missing-frames');
+  if (mf) mf.textContent = '';
 }
 
 function scanFrame() {
@@ -413,10 +479,21 @@ function scanFrame() {
   canvas.height = video.videoHeight;
   ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const code = jsQR(imageData.data, imageData.width, imageData.height);
+  // attemptBoth handles glare-inverted or washed-out frames at a small CPU cost
+  const code = jsQR(imageData.data, imageData.width, imageData.height, {
+    inversionAttempts: 'attemptBoth'
+  });
 
   if (!code) return;
+  flashHit();
   handlePayload(code.data);
+}
+
+let flashTimer = null;
+function flashHit() {
+  video.classList.add('hit');
+  if (flashTimer) clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => video.classList.remove('hit'), 120);
 }
 
 function handlePayload(payload) {
@@ -450,6 +527,8 @@ function handlePayload(payload) {
   updateProgress();
 }
 
+const missingFramesEl = document.getElementById('missing-frames');
+
 function updateProgress() {
   const receivedCount = Object.keys(receivedChunks).length;
 
@@ -457,11 +536,24 @@ function updateProgress() {
     const pct = Math.min(100, Math.round((receivedCount / activeTotal) * 100));
     progressFill.style.width = pct + '%';
     statusText.textContent = `Receiving "${activeFilename || ''}"... ${receivedCount} / ${activeTotal} frames`;
+
+    // Show which frames are still missing once we're past halfway -
+    // helps diagnose a stubborn frame that keeps getting skipped
+    const missing = [];
+    for (let i = 0; i < activeTotal; i++) {
+      if (!(i in receivedChunks)) missing.push(i);
+    }
+    if (missing.length > 0 && missing.length <= 20 && receivedCount > 0) {
+      missingFramesEl.textContent = 'Waiting on frames: ' + missing.join(', ');
+    } else {
+      missingFramesEl.textContent = '';
+    }
   } else {
     statusText.textContent = `Receiving... ${receivedCount} frames (waiting for header)`;
   }
 
   if (metaReceived && activeTotal > 0 && receivedCount === activeTotal && !saved) {
+    missingFramesEl.textContent = '';
     completeTransfer();
   }
 }

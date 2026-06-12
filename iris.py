@@ -35,9 +35,9 @@ app = Flask(__name__)
 def make_qr_data_url(text: str) -> str:
     """Generate a QR code PNG for `text`, return as a data: URL."""
     qr = qrcode.QRCode(
-        error_correction=qrcode.constants.ERROR_CORRECT_L,
-        box_size=8,
-        border=2,
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=12,
+        border=3,
     )
     qr.add_data(text)
     qr.make(fit=True)
